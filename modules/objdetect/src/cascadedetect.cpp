@@ -46,6 +46,10 @@
 #include "opencv2/objdetect/objdetect_c.h"
 #include "opencl_kernels_objdetect.hpp"
 
+#if defined ANDROID && defined RENDERSCRIPT
+#include "rsobjdetect.hpp"
+#endif
+
 namespace cv
 {
 
@@ -470,6 +474,29 @@ bool FeatureEvaluator::updateScaleData( Size imgsz, const std::vector<float>& _s
     return recalcOptFeatures;
 }
 
+#if defined ANDROID && defined RENDERSCRIPT
+void haarIntegral(Mat in, int width, int height, int* out, int* outSq) {
+    int sum = 0, sumSq =0, val = 0, idx = 0;
+    uchar *src = in.data;
+    size_t step = in.step;
+
+    memset(out, 0, width*sizeof(out[0]));
+    memset(outSq, 0, width*sizeof(outSq[0]));
+    outSq += width;
+    out += width;
+
+    for (int y = 1; y < height; y++, out += width, outSq += width, src += step) {
+        sum = sumSq = out[0] = outSq[0] = 0;
+        for (int x = 1; x < width; x++) {
+            val = src[x];
+            sum += val;
+            sumSq += val * val;
+            out[x] = out[x - width] + sum;
+            outSq[x] = outSq[x - width] + sumSq;
+        }
+    }
+}
+#endif
 
 bool FeatureEvaluator::setImage( InputArray _image, const std::vector<float>& _scales )
 {
@@ -510,12 +537,30 @@ bool FeatureEvaluator::setImage( InputArray _image, const std::vector<float>& _s
         sbuf.create(sbufSize.height*nchannels, sbufSize.width, CV_32S);
         rbuf.create(sz0, CV_8U);
 
+        
+#if defined ANDROID && defined RENDERSCRIPT
+        integralImages = (int **) malloc(sizeof(int *)*nscales);
+        integralImagesSq = (int **) malloc(sizeof(int *)*nscales);
+#endif
+
         for (i = 0; i < nscales; i++)
         {
+#if defined ANDROID && defined RENDERSCRIPT
+            const ScaleData& s = scaleData->at(i);
+            Mat dst(s.szi.height - 1, s.szi.width - 1 , CV_8U);
+            resize(image, dst, dst.size(), 1. / s.scale, 1. / s.scale, INTER_LINEAR);
+            const Size sz = s.getWorkingSize(origWinSize);
+            int* intImg = (int *)malloc(sizeof(int)*s.szi.area());
+            int* intImgSq = (int *)malloc(sizeof(int)*s.szi.area());
+            haarIntegral(dst, sz.width, sz.height, intImg, intImgSq);
+            integralImages[i] = intImg;
+            integralImagesSq[i] = intImgSq;
+#else
             const ScaleData& s = scaleData->at(i);
             Mat dst(s.szi.height - 1, s.szi.width - 1, CV_8U, rbuf.ptr());
             resize(image, dst, dst.size(), 1. / s.scale, 1. / s.scale, INTER_LINEAR);
             computeChannels((int)i, dst);
+#endif
         }
         sbufFlag = SBUF_VALID;
     }
@@ -761,6 +806,10 @@ LBPEvaluator::~LBPEvaluator()
 
 bool LBPEvaluator::read( const FileNode& node, Size _origWinSize )
 {
+#if defined RENDERSCRIPT
+        CV_Error(Error::StsNotImplemented, "Renderscript cannot be used with LBP in 3.0");
+#endif
+
     if (!FeatureEvaluator::read(node, _origWinSize))
         return false;
     if(features.empty())
@@ -1283,7 +1332,6 @@ void CascadeClassifierImpl::detectMultiScaleNoGrouping( InputArray _image, std::
 
     tryOpenCL = false;
 
-    // CPU code
     featureEvaluator->getMats();
     {
         Mat currentMask;
@@ -1301,13 +1349,138 @@ void CascadeClassifierImpl::detectMultiScaleNoGrouping( InputArray _image, std::
             szw = s[i].getWorkingSize(data.origWinSize);
             stripeSizes[i] = std::max((szw.height/s[i].ystep + nstripes-1)/nstripes, 1)*s[i].ystep;
         }
-
-        CascadeClassifierInvoker invoker(*this, (int)nscales, nstripes, s, stripeSizes,
-                                         candidates, rejectLevels, levelWeights,
-                                         outputRejectLevels, currentMask, &mtx);
-        parallel_for_(Range(0, nstripes), invoker);
+#if defined ANDROID && defined RENDERSCRIPT
+        rs_parallel_detect(candidates, nscales);
+#else
+    CascadeClassifierInvoker invoker(*this, (int)nscales, nstripes, s, stripeSizes,
+                                     candidates, rejectLevels, levelWeights,
+                                     outputRejectLevels, currentMask, &mtx);
+     parallel_for_(Range(0, nstripes), invoker);
+#endif
     }
 }
+
+#if defined ANDROID && defined RENDERSCRIPT
+void CascadeClassifierImpl::rs_parallel_detect(std::vector<Rect>& candidates, int nscales) {
+    HaarEvaluator& heval = (HaarEvaluator&)*featureEvaluator;
+    const FeatureEvaluator::ScaleData* s = &featureEvaluator->getScaleData(0);
+    Size origWinSize = data.origWinSize;
+    const int origWidth = origWinSize.width;
+    const int origHeight = origWinSize.height;
+    const int stepSize = heval.sbuf.step.p[0];
+
+    if (!loadedHaarVars) setHaarVars();
+
+    unsigned char* inData = heval.sbuf.data;
+    const char* fin;
+    for( int scaleIdx = 0; scaleIdx < nscales; scaleIdx++ )
+    {
+       const FeatureEvaluator::ScaleData& sd = s[scaleIdx];
+       const float scalingFactor = sd.scale;
+       const Size sz = sd.getWorkingSize(origWinSize);
+       const int winWidth = origWinSize.width * scalingFactor;
+       const int winHeight = origWinSize.height * scalingFactor;
+       const int layerOfs = sd.layer_ofs;
+       const int area = sz.width*sz.height;
+
+        bool *outData = (bool *)malloc(sizeof(bool)*area);
+        int* arr = heval.integralImages[scaleIdx];
+        int* arrSq = heval.integralImagesSq[scaleIdx];
+
+
+        innerloops(sz.height,sz.width,arr,arrSq,sd.ystep,outData);
+
+        for (int y=0; y < sz.height; y += sd.ystep) {
+            for (int x = 0; x< sz.width; x += sd.ystep) {
+                if (*(outData + x + y*sz.width)) {
+                    candidates.push_back(Rect(cvRound(x*scalingFactor),
+                                      cvRound(y*scalingFactor),
+                                      winWidth, winHeight));
+                }
+            }
+        }
+
+        free(outData);
+   }
+    cleanUpInnerLoops();
+    for (int i = 0; i < nscales; i++)
+    {
+        free(heval.integralImages[i]);
+        free(heval.integralImagesSq[i]);
+    }
+    free(heval.integralImages);
+    free(heval.integralImagesSq);
+}
+
+void CascadeClassifierImpl::setHaarVars() {
+    HaarVars hf;
+    Size origWinSize = data.origWinSize;
+    const int origWidth = origWinSize.width;
+    const int origHeight = origWinSize.height;
+    HaarEvaluator& heval = (HaarEvaluator&)*featureEvaluator;
+    int _nofs[4] = {(heval.nofs)[0], (heval.nofs)[1], (heval.nofs)[2], (heval.nofs)[3]};
+    memcpy (haarVars.nofs, _nofs, sizeof(_nofs));
+    hf.sqofs = heval.sqofs;
+    hf.normRectArea = heval.normrect.area();
+
+    int nOptFeatures = (*heval.optfeatures).size();
+    HaarFeature *haf = (HaarFeature *)malloc(sizeof(HaarFeature)*nOptFeatures);
+    const std::vector<HaarEvaluator::Feature>& ff = *heval.features;
+    for (int i = 0; i < nOptFeatures; i++ ){
+        HaarFeature f;
+        for (int j = 0; j < 3; j++) {
+            f.x[j]=ff[i].rect[j].r.x;
+            f.y[j]=ff[i].rect[j].r.y;
+            f.width[j] = ff[i].rect[j].r.width;
+            f.height[j] = ff[i].rect[j].r.height;
+        }
+        f.weight0 = ff[i].rect[0].weight;
+        f.weight1 = ff[i].rect[1].weight;
+        f.weight2 = ff[i].rect[2].weight;
+        haf[i] = f;
+    }
+    hf.haarFeatures = &haf[0];
+
+
+    int nstages = (int) data.stages.size();
+    HaarStage *stageArr = (HaarStage *)malloc(sizeof(HaarStage)*nstages);
+    for (int j = 0; j < nstages; j++ ){
+        HaarStage st;
+        st.first = data.stages[j].first;
+        st.ntrees = data.stages[j].ntrees;
+        st.threshold = data.stages[j].threshold;
+        stageArr[j] = st;
+    }
+    hf.stages = &stageArr[0];
+    hf.stagesSize = nstages;
+    hf.nStumps = (int) data.stumps.size();
+
+    int nstumps = data.stumps.size();
+    HaarStump *stumpArr = (HaarStump *)malloc(sizeof(HaarStump)*nstumps);
+    for (int j = 0; j < nstumps; j++){
+        HaarStump st;
+        st.featureIdx = data.stumps[j].featureIdx;
+        st.threshold = data.stumps[j].threshold;
+        st.left = data.stumps[j].left;
+        st.right = data.stumps[j].right;
+        stumpArr[j] = st;
+    }
+    hf.stumps = &stumpArr[0];
+    hf.nFeatures = (int) heval.optfeatures->size();
+
+    HaarRect nr;
+    nr.x = heval.normrect.x;
+    nr.y = heval.normrect.y;
+    nr.width = heval.normrect.width;
+    nr.height = heval.normrect.height;
+    hf.nrect = nr;
+
+    haarVars = hf;
+
+    loadedHaarVars = true;
+    initInnerLoop(haarVars,origWidth,origHeight);
+}
+#endif
 
 
 void CascadeClassifierImpl::detectMultiScale( InputArray _image, std::vector<Rect>& objects,
@@ -1553,9 +1726,16 @@ BaseCascadeClassifier::~BaseCascadeClassifier()
 {
 }
 
-CascadeClassifier::CascadeClassifier() {}
+CascadeClassifier::CascadeClassifier() {
+#if defined(RENDERSCRIPT) && !defined(ANDROID)
+    CV_Error(Error::StsNotImplemented, "Renderscript cannot be used on non-Android devices");
+#endif
+}
 CascadeClassifier::CascadeClassifier(const String& filename)
 {
+#if defined(RENDERSCRIPT) && !defined(ANDROID)
+    CV_Error(Error::StsNotImplemented, "Renderscript cannot be used on non-Android devices");
+#endif
     load(filename);
 }
 

@@ -634,7 +634,7 @@ LOCAL_C_INCLUDES := \
     $(LOCAL_PATH)/3rdparty/libjasper/jasper \
     $(LOCAL_PATH)/3rdparty/libjpeg \
     $(LOCAL_PATH)/3rdparty/libtiff \
-    $(LOCAL_PATH)/3rdparty/libpng \
+    $(LOCAL_PATH)/../libpng \
     $(LOCAL_PATH)/../zlib \
     $(LOCAL_PATH)/../zlib/src
 
@@ -798,6 +798,9 @@ include $(BUILD_SHARED_LIBRARY)
 
 include $(CLEAR_VARS)
 
+#Use true to build with renderscript, false to build without
+WITH_RENDERSCRIPT = true
+
 LOCAL_NDK_STL_VARIANT := gnustl_static
 LOCAL_SDK_VERSION := 21
 
@@ -811,6 +814,7 @@ LOCAL_LDLIBS := -L$(SYSROOT)/usr/lib -llog -ldl
 LOCAL_C_INCLUDES := \
     $(LOCAL_PATH) \
     $(LOCAL_PATH)/modules/objdetect \
+    $(LOCAL_PATH)/modules/objdetect/src \
     $(LOCAL_PATH)/modules/core/include \
     $(LOCAL_PATH)/modules/hal/include \
     $(LOCAL_PATH)/modules/objdetect/include \
@@ -835,9 +839,50 @@ LOCAL_SRC_FILES := \
     modules/java/generator/src/cpp/converters.cpp
 
 LOCAL_SHARED_LIBRARIES := libopencv_core libopencv_imgproc libopencv_ml libopencv_imgcodecs libopencv_videoio libopencv_highgui
+
+ifeq ($(WITH_RENDERSCRIPT), true)
+LOCAL_SHARED_LIBRARIES += libopencv_rsobjdetect
+LOCAL_CFLAGS += -DRENDERSCRIPT=1
+LOCAL_C_INCLUDES += $(LOCAL_PATH)/modules/rsobjdetect/src
+endif
+
 LOCAL_STATIC_LBIRARIES := libopencv_hal
 
 include $(BUILD_SHARED_LIBRARY)
+
+
+
+
+ifeq ($(WITH_RENDERSCRIPT),true)
+include $(CLEAR_VARS)
+LOCAL_MODULE := libopencv_rsobjdetect
+
+LOCAL_NDK_STL_VARIANT := gnustl_static
+LOCAL_SDK_VERSION := 21
+
+LOCAL_CFLAGS := $(LOCAL_C_INCLUDES:%=-I%)
+
+LOCAL_C_INCLUDES := \
+        modules/rsobjdetect/src
+
+LOCAL_SRC_FILES:= \
+        modules/rsobjdetect/src/rs/detectAt.rs \
+        modules/rsobjdetect/src/innerloop.cpp
+
+LOCAL_LDFLAGS := -llog -ldl
+
+LOCAL_MODULE_TAGS := optional
+
+LOCAL_C_INCLUDES := frameworks/rs/cpp
+LOCAL_C_INCLUDES += frameworks/rs
+LOCAL_C_INCLUDES += $(call intermediates-dir-for,STATIC_LIBRARIES,libRS,TARGET,)
+
+LOCAL_SHARED_LIBRARIES := libRScpp
+
+LOCAL_CLANG := true
+
+include $(BUILD_SHARED_LIBRARY)
+endif
 
 
 

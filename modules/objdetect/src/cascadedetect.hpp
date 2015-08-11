@@ -1,6 +1,7 @@
 #pragma once
 
 #include "opencv2/core/ocl.hpp"
+#include "HaarStructs.h"
 
 namespace cv
 {
@@ -71,6 +72,12 @@ protected:
     UMat urbuf, usbuf, ufbuf, uscaleData;
 
     Ptr<std::vector<ScaleData> > scaleData;
+
+#if defined ANDROID && defined RENDERSCRIPT
+    int** integralImages;
+    int** integralImagesSq;
+    friend class CascadeClassifierImpl;
+#endif
 };
 
 
@@ -132,6 +139,10 @@ protected:
                                     std::vector<int>& rejectLevels, std::vector<double>& levelWeights,
                                     double scaleFactor, Size minObjectSize, Size maxObjectSize,
                                     bool outputRejectLevels = false );
+#if defined ANDROID && defined RENDERSCRIPT
+    void setHaarVars();
+    void rs_parallel_detect(std::vector<Rect>& candidates, int nscales);
+#endif
 
     enum { MAX_FACES = 10000 };
     enum { BOOST = 0 };
@@ -222,6 +233,10 @@ protected:
     bool tryOpenCL;
 
     Mutex mtx;
+#if defined ANDROID && defined RENDERSCRIPT
+    HaarVars haarVars;
+    bool loadedHaarVars;
+#endif
 };
 
 #define CC_CASCADE_PARAMS "cascadeParams"
@@ -362,6 +377,8 @@ public:
 protected:
     virtual void computeChannels( int i, InputArray img );
     virtual void computeOptFeatures();
+
+    friend class CascadeClassifierImpl;
 
     Ptr<std::vector<Feature> > features;
     Ptr<std::vector<OptFeature> > optfeatures;
