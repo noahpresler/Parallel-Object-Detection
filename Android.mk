@@ -859,8 +859,7 @@ LOCAL_MODULE := libopencv_rsobjdetect
 
 LOCAL_NDK_STL_VARIANT := gnustl_static
 LOCAL_SDK_VERSION := 21
-
-LOCAL_CFLAGS := $(LOCAL_C_INCLUDES:%=-I%)
+LOCAL_RENDERSCRIPT_TARGET_API := 21
 
 LOCAL_C_INCLUDES := \
         modules/rsobjdetect/src
@@ -873,11 +872,13 @@ LOCAL_LDFLAGS := -llog -ldl
 
 LOCAL_MODULE_TAGS := optional
 
+LOCAL_RENDERSCRIPT_COMPATIBILITY := 21
+
 LOCAL_C_INCLUDES := frameworks/rs/cpp
 LOCAL_C_INCLUDES += frameworks/rs
 LOCAL_C_INCLUDES += $(call intermediates-dir-for,STATIC_LIBRARIES,libRS,TARGET,)
 
-LOCAL_SHARED_LIBRARIES := libRScpp
+LOCAL_STATIC_LIBRARIES := libRScpp_static
 
 LOCAL_CLANG := true
 
